@@ -65,25 +65,27 @@ bool parseObservation(std::string csv_line, CalibrationObservation& observation)
                    >> observation.vertical_deg);
 }
 
-// 使用一个候选外参 R、t，计算一条观测的三维方向残差。
-// rotation_map_from_sensor: 将设备坐标系向量旋转到地图坐标系的候选旋转矩阵 R。
-// translation_map_from_sensor: 设备原点在地图坐标系中的候选位置 t，单位为米。
+/*输入参数：
+    observation ： CSV中一行标定观测数据。包括 ：地图坐标系xyz 与 设备水平/垂直角度
+    rotation_map_from_sensor: 将设备坐标系向量旋转到地图坐标系的候选旋转矩阵 R。
+    translation_map_from_sensor: 设备原点在地图坐标系中的候选位置 t，单位为米。
+*/ 
 Eigen::Vector3d calculateBearingResidual(
     const CalibrationObservation& observation,
     const Eigen::Matrix3d& rotation_map_from_sensor,
     const Eigen::Vector3d& translation_map_from_sensor)
 {
-    // CSV给出的LiDAR地图点 P^M。
-    const Eigen::Vector3d point_map(
-        observation.x_m,
-        observation.y_m,
-        observation.z_m);
-
     // 遥测设备角度换算出的实测射线方向 d^S。
     const Eigen::Vector3d measured_bearing_sensor(
         observation.bearing_sensor.x,
         observation.bearing_sensor.y,
         observation.bearing_sensor.z);
+
+    // CSV给出的LiDAR地图点 P^M。
+    const Eigen::Vector3d point_map(
+        observation.x_m,
+        observation.y_m,
+        observation.z_m);
 
     // R负责“设备到地图”，所以这里用R的转置，把(P^M-t)变回设备坐标系。
     const Eigen::Vector3d point_sensor =
