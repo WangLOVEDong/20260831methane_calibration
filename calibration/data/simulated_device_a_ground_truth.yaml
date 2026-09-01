@@ -1,0 +1,35 @@
+device_id: simulated_device_a
+
+coordinate_convention:
+  sensor_x: forward
+  sensor_y: left
+  sensor_z: up
+  angle_unit: degree
+  horizontal_positive: counterclockwise
+  vertical_positive: upward
+
+rotation_convention: R_map_from_sensor = Rz(yaw) * Ry(pitch) * Rx(roll)
+
+euler_degrees:
+  roll: 5.0
+  pitch: -8.0
+  yaw: 20.0
+
+rotation_map_from_sensor:
+  rows: 3
+  cols: 3
+  data:
+    - 0.930547597
+    - -0.352116876
+    - -0.100473259
+    - 0.338691627
+    - 0.931968193
+    - -0.129318480
+    - 0.139173101
+    - 0.086307549
+    - 0.986499800
+
+translation_map_from_sensor_m:
+  - 1.2
+  - -0.8
+  - 0.9
