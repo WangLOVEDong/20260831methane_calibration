@@ -8,6 +8,7 @@ coordinate_convention:
   horizontal_positive: counterclockwise
   vertical_positive: upward
 
+# 只是 计算模拟值的时候给出的，实际本项目不会用这种方式计算旋转矩阵
 rotation_convention: R_map_from_sensor = Rz(yaw) * Ry(pitch) * Rx(roll)
 
 euler_degrees:

@@ -100,6 +100,7 @@ Eigen::Matrix3d estimateInitialRotation(
 
     
     // 对H进行SVD分解：H = U * Sigma * V^T。
+    /*第一个参数是待分解的矩阵，第二个参数是分解选项，这里表示计算完整的U和V矩阵*/
     Eigen::JacobiSVD<Eigen::Matrix3d> svd(
         direction_correlation,
         Eigen::ComputeFullU | Eigen::ComputeFullV);
@@ -191,14 +192,13 @@ int main(int argc, char* argv[])
         std::printf("CSV contains no calibration observations: %s\n", csv_path.c_str());
         return 1;
     }
-
     if (observations.size() < 3)
     {
         std::printf("At least 3 calibration observations are required.\n");
         return 1;
     }
 
-    // 第2～4步：根据全部点—方向对应关系，通过Wahba/SVD求初始旋转矩阵R0。
+    // 第2～4步：根据全部点—方向对应关系和 初始偏差t0 ，通过SVD求初始旋转矩阵R0。
     const Eigen::Matrix3d rotation_initial = estimateInitialRotation(
         observations,
         translation_initial);
