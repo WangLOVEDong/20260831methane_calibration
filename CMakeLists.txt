@@ -20,6 +20,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # REQUIRED 表示如果没有找到 Eigen3，CMake 配置阶段立即报错。
 find_package(Eigen3 REQUIRED)
 
+# 第5步使用Ceres提供的旋转矩阵与旋转向量转换函数。
+# REQUIRED 表示没有安装Ceres时，CMake配置阶段立即报错。
+find_package(Ceres REQUIRED)
+
 # 把 src/main.cpp 编译成名为 methane_app 的可执行文件。
 # methane_app 是前面创建项目时使用的基础练习程序。
 # add_executable(methane_app src/main.cpp)
@@ -30,5 +34,6 @@ add_executable(methane_calibrate
 )
 
 # 让 methane_calibrate 可以使用 Eigen3 的头文件和矩阵运算功能。
-# 当前只学习到Wahba/SVD初始化阶段，暂时不链接Ceres。
-target_link_libraries(methane_calibrate PRIVATE Eigen3::Eigen)
+# 同时链接Ceres；当前只用其旋转表示转换，尚未开始非线性优化。
+target_link_libraries(methane_calibrate PRIVATE Eigen3::Eigen ceres)
+# 作用：让编译器和链接器能找到Ceres库。

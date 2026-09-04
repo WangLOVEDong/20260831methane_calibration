@@ -1,4 +1,5 @@
 #include <Eigen/Dense> // Eigen::Matrix3d, Eigen::Vector3d
+#include <ceres/rotation.h> // ceres::RotationMatrixToAngleAxis
 
 #include <algorithm>  // std::replace
 #include <cmath>      // std::cos, std::sin
@@ -203,6 +204,29 @@ int main(int argc, char* argv[])
         observations,
         translation_initial);
 
+    /*
+        第5步：把SVD得到的3x3初始旋转矩阵R0转换为Ceres使用的旋转向量phi0。
+        rotation_initial.data() 指向R0的9个double元素；rotation_vector_initial.data()
+        提供3个double元素，接收 phi0 = theta0 * a0，单位为弧度。
+    */ 
+    Eigen::Vector3d rotation_vector_initial;   //定义旋转向量 phi0
+    //把第一个参数 旋转矩阵R0 转换为旋转向量 phi0，存储在 rotation_vector_initial 中
+    ceres::RotationMatrixToAngleAxis(
+        rotation_initial.data(),
+        rotation_vector_initial.data());
+
+    const double rotation_angle_initial_rad = rotation_vector_initial.norm();  //计算旋转角度
+
+    // 下面的逻辑 是 如果旋转角度大于一个很小的阈值，就计算旋转轴 a0 = phi0 / theta0，
+    // 否则旋转轴为零向量，相当于任意方向旋转了
+    Eigen::Vector3d rotation_axis_initial = Eigen::Vector3d::Zero();        
+    if (rotation_angle_initial_rad > 1e-12)
+    {
+        rotation_axis_initial = rotation_vector_initial / rotation_angle_initial_rad;
+    }
+
+    
+
     std::printf("Calibration observations: %zu\n", observations.size());
     std::printf("Initial translation t0: [%.6f, %.6f, %.6f] m\n",
                 translation_initial.x(),
@@ -221,6 +245,22 @@ int main(int argc, char* argv[])
                 rotation_initial(2, 0),
                 rotation_initial(2, 1),
                 rotation_initial(2, 2));
+    std::printf("Initial rotation vector phi0: [%.9f, %.9f, %.9f] rad\n",
+                rotation_vector_initial.x(),
+                rotation_vector_initial.y(),
+                rotation_vector_initial.z());
+    std::printf("Initial rotation angle theta0: %.9f rad (%.6f deg)\n",
+                rotation_angle_initial_rad,
+                rotation_angle_initial_rad * 180.0 / kPi);
+    std::printf("Initial rotation axis a0: [%.9f, %.9f, %.9f]\n",
+                rotation_axis_initial.x(),
+                rotation_axis_initial.y(),
+                rotation_axis_initial.z());
 
     return 0;
 }
+
+
+
+
+
