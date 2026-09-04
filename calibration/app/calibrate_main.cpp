@@ -118,6 +118,70 @@ Eigen::Matrix3d estimateInitialRotation(
     return matrix_u * determinant_correction * matrix_v.transpose();
 }
 
+/*
+    计算一条观测的三维方向残差 r_i。
+    observation：CSV中的一行地图点和水平/垂直角观测。
+    rotation_map_from_sensor：候选旋转矩阵R，负责把设备坐标系方向转到地图坐标系。
+    translation_map_from_sensor：候选平移向量t，表示设备原点在地图坐标系中的位置。
+    返回值：r_i = d_i^S x d_i^S_predicted；两条单位射线重合时返回零向量。
+*/
+Eigen::Vector3d calculateBearingResidual(
+    const CalibrationObservation& observation,
+    const Eigen::Matrix3d& rotation_map_from_sensor,
+    const Eigen::Vector3d& translation_map_from_sensor)
+{
+    // CSV水平角、垂直角对应的实测设备单位方向d_i^S。
+    const Direction3D measured_direction_components = anglesToBearing(
+        observation.horizontal_deg,
+        observation.vertical_deg);
+    const Eigen::Vector3d measured_bearing_sensor(
+        measured_direction_components.x,
+        measured_direction_components.y,
+        measured_direction_components.z);
+
+    // CSV中的LiDAR地图点P_i^M。
+    const Eigen::Vector3d point_map(
+        observation.x_m,
+        observation.y_m,
+        observation.z_m);
+
+    // R负责“设备到地图”，因此用R^T把(P_i^M-t)转换回设备坐标系。
+    const Eigen::Vector3d point_sensor =
+        rotation_map_from_sensor.transpose() *
+        (point_map - translation_map_from_sensor);
+
+    // 去掉未知距离lambda_i，得到候选外参预测的设备单位方向d_i^S_predicted。
+    const Eigen::Vector3d predicted_bearing_sensor =
+        point_sensor.normalized();
+
+    // 测量方向和预测方向的叉积作为残差，重合时返回零向量。
+    return measured_bearing_sensor.cross(predicted_bearing_sensor);
+}
+
+// 对全部观测累加总平方残差 J(R, t) = sum_i ||r_i(R, t)||^2。
+// observations：CSV中的全部观测；R和t：同一组待评价的候选外参。
+// 返回值：标量J。J越小，说明这组外参与全部方向观测越一致。
+double calculateTotalSquaredResidual(
+    const std::vector<CalibrationObservation>& observations,
+    const Eigen::Matrix3d& rotation_map_from_sensor,
+    const Eigen::Vector3d& translation_map_from_sensor)
+{
+    double total_squared_residual = 0.0;
+
+    for (const CalibrationObservation& observation : observations)
+    {
+        const Eigen::Vector3d residual = calculateBearingResidual(
+            observation,
+            rotation_map_from_sensor,
+            translation_map_from_sensor);
+
+        // squaredNorm() = r_x^2 + r_y^2 + r_z^2，也就是||r_i||^2。
+        total_squared_residual += residual.squaredNorm();
+    }
+
+    return total_squared_residual;
+}
+
 
 int main(int argc, char* argv[])
 {
@@ -215,6 +279,30 @@ int main(int argc, char* argv[])
         rotation_initial.data(),
         rotation_vector_initial.data());
 
+    // 第6步的初值：前三个元素是旋转向量phi0（弧度），后三个元素是平移t0（米）。
+    // 下一阶段Ceres会直接修改这个数组，因此这里不能写成const。
+    double extrinsic_parameters[6] = {
+        rotation_vector_initial.x(), // [0] = phi_x0
+        rotation_vector_initial.y(), // [1] = phi_y0
+        rotation_vector_initial.z(), // [2] = phi_z0
+        translation_initial.x(),     // [3] = tx0
+        translation_initial.y(),     // [4] = ty0
+        translation_initial.z()      // [5] = tz0
+    };
+
+    // 使用当前初值x0，对CSV第一行观测计算一次残差，暂时不进行优化。
+    const Eigen::Vector3d first_initial_residual =
+        calculateBearingResidual(
+            observations.front(),
+            rotation_initial,
+            translation_initial);
+
+    const double initial_total_squared_residual =
+        calculateTotalSquaredResidual(
+            observations,
+            rotation_initial,
+            translation_initial);
+
     const double rotation_angle_initial_rad = rotation_vector_initial.norm();  //计算旋转角度
 
     // 下面的逻辑 是 如果旋转角度大于一个很小的阈值，就计算旋转轴 a0 = phi0 / theta0，
@@ -256,6 +344,20 @@ int main(int argc, char* argv[])
                 rotation_axis_initial.x(),
                 rotation_axis_initial.y(),
                 rotation_axis_initial.z());
+    std::printf("Initial parameters [phi_x, phi_y, phi_z, tx, ty, tz]:\n");
+    std::printf("[%.9f, %.9f, %.9f, %.6f, %.6f, %.6f]\n",
+                extrinsic_parameters[0],
+                extrinsic_parameters[1],
+                extrinsic_parameters[2],
+                extrinsic_parameters[3],
+                extrinsic_parameters[4],
+                extrinsic_parameters[5]);
+    std::printf("First initial bearing residual r1: [%.9f, %.9f, %.9f]\n",
+                first_initial_residual.x(),
+                first_initial_residual.y(),
+                first_initial_residual.z());
+    std::printf("Initial total squared residual J: %.12f\n",
+                initial_total_squared_residual);
 
     return 0;
 }
