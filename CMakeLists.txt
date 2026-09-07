@@ -34,6 +34,6 @@ add_executable(methane_calibrate
 )
 
 # 让 methane_calibrate 可以使用 Eigen3 的头文件和矩阵运算功能。
-# 同时链接Ceres；当前只用其旋转表示转换，尚未开始非线性优化。
+# 同时链接Ceres；标定程序使用其数值雅可比与LM非线性优化功能。
 target_link_libraries(methane_calibrate PRIVATE Eigen3::Eigen ceres)
 # 作用：让编译器和链接器能找到Ceres库。

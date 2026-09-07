@@ -1,10 +1,14 @@
 #include <Eigen/Dense> // Eigen::Matrix3d, Eigen::Vector3d
+#include <ceres/ceres.h>    // ceres::Problem, ceres::Solve, NumericDiffCostFunction
 #include <ceres/rotation.h> // ceres::RotationMatrixToAngleAxis
 
 #include <algorithm>  // std::replace
 #include <cmath>      // std::cos, std::sin
+#include <filesystem> // std::filesystem::path, create_directories
+#include <system_error> // std::error_code
 #include <cstdio>     // std::printf
-#include <fstream>    // std::ifstream
+#include <fstream>    // std::ifstream, std::ofstream
+#include <iomanip>    // std::fixed, std::setprecision
 #include <sstream>    // std::istringstream
 #include <string>     // std::string, std::getline
 #include <vector>     // std::vector
@@ -45,9 +49,11 @@ Direction3D anglesToBearing(double horizontal_deg, double vertical_deg)
     };
 }
 
-// 解析一行简单的逗号分隔CSV；成功时填充 observation 并返回 true。
+// 从CSV的一行读取一条原始标定参数；成功时填充 observation 并返回 true。
+// csv_line：当前CSV原始文本行。
+// observation：输出参数，保存地图坐标和设备水平/垂直角度。
 /*在 csv_line 的全部字符中  把逗号 ',' 替换为空格 ' '*/
-bool parseObservation(std::string csv_line, CalibrationObservation& observation)
+bool readRawParameters(std::string csv_line, CalibrationObservation& observation)
 {
     /* 遍历一下，csv中每一行的逗号 ',' 替换为空格 ' ' */
     std::replace(csv_line.begin(), csv_line.end(), ',', ' ');   //replace直接修改原字符串 `csv_line`，不会生成新字符串副本
@@ -63,18 +69,19 @@ bool parseObservation(std::string csv_line, CalibrationObservation& observation)
                    >> observation.horizontal_deg
                    >> observation.vertical_deg);
 }
+/* 由初始平移向量t0和全部观测，计算初始旋转矩阵R0。
+    第2～4步：根据t0计算地图方向，根据设备角度计算设备方向，最后通过Wahba/SVD求R0。
+    observations：CSV中的全部原始观测。
+    translation_initial：设备原点在地图坐标系中的平移初值t0，单位为米。
+    返回值estimateInitialRotation：设备坐标系到LiDAR地图坐标系的初始旋转矩阵R0。
+*/
 
-// 第2～4步：根据t0计算地图方向，根据设备角度计算设备方向，最后通过Wahba/SVD求R0。
-// observations：CSV中的全部原始观测。
-// translation_initial：设备原点在地图坐标系中的平移初值t0，单位为米。
-// 返回值：设备坐标系到LiDAR地图坐标系的初始旋转矩阵R0。
 Eigen::Matrix3d estimateInitialRotation(
     const std::vector<CalibrationObservation>& observations,
     const Eigen::Vector3d& translation_initial)
 {
     Eigen::Matrix3d direction_correlation = Eigen::Matrix3d::Zero();
-
-     
+    
     for (const CalibrationObservation& observation : observations)
     {
         // 第2步：由地图点P_i^M和设备位置初值t0计算地图单位方向d_i^M。
@@ -119,7 +126,7 @@ Eigen::Matrix3d estimateInitialRotation(
 }
 
 /*
-    计算一条观测的三维方向残差 r_i。
+    求残差 r_i。
     observation：CSV中的一行地图点和水平/垂直角观测。
     rotation_map_from_sensor：候选旋转矩阵R，负责把设备坐标系方向转到地图坐标系。
     translation_map_from_sensor：候选平移向量t，表示设备原点在地图坐标系中的位置。
@@ -158,9 +165,57 @@ Eigen::Vector3d calculateBearingResidual(
     return measured_bearing_sensor.cross(predicted_bearing_sensor);
 }
 
-// 对全部观测累加总平方残差 J(R, t) = sum_i ||r_i(R, t)||^2。
-// observations：CSV中的全部观测；R和t：同一组待评价的候选外参。
-// 返回值：标量J。J越小，说明这组外参与全部方向观测越一致。
+// CeresBearingResidual 把一条观测包装成Ceres能够调用的残差对象。
+// observation：构造对象时保存的一条CSV观测。
+// extrinsic_parameters：Ceres提供的6个待优化参数
+// [phi_x, phi_y, phi_z, tx, ty, tz]。
+// residuals：函数写出的长度为3的残差数组 [r_x, r_y, r_z]。
+struct CeresBearingResidual
+{
+    explicit CeresBearingResidual(const CalibrationObservation& observation)
+        : observation_(observation)
+    {
+    }
+
+    bool operator()(const double* const extrinsic_parameters,
+                    double* residuals) const
+    {
+        // 前3个参数phi通过罗德里格斯公式转换为候选旋转矩阵R(phi)。
+        const Eigen::Vector3d rotation_vector(
+            extrinsic_parameters[0],
+            extrinsic_parameters[1],
+            extrinsic_parameters[2]);
+        Eigen::Matrix3d rotation_map_from_sensor;
+        ceres::AngleAxisToRotationMatrix(
+            rotation_vector.data(),
+            rotation_map_from_sensor.data());
+
+        // 后3个参数构成候选平移向量t。
+        const Eigen::Vector3d translation_map_from_sensor(
+            extrinsic_parameters[3],
+            extrinsic_parameters[4],
+            extrinsic_parameters[5]);
+
+        const Eigen::Vector3d bearing_residual = calculateBearingResidual(
+            observation_,
+            rotation_map_from_sensor,
+            translation_map_from_sensor);
+
+        residuals[0] = bearing_residual.x();
+        residuals[1] = bearing_residual.y();
+        residuals[2] = bearing_residual.z();
+        return true;
+    }
+
+private:
+    CalibrationObservation observation_;
+};
+
+/*  求整体残差
+    对全部观测累加总平方残差 J(R, t) = sum_i ||r_i(R, t)||^2。
+    observations：CSV中的全部观测；R和t：同一组待评价的候选外参。
+    返回值：标量J。J越小，说明这组外参与全部方向观测越一致。
+*/
 double calculateTotalSquaredResidual(
     const std::vector<CalibrationObservation>& observations,
     const Eigen::Matrix3d& rotation_map_from_sensor,
@@ -183,17 +238,111 @@ double calculateTotalSquaredResidual(
 }
 
 
+/*   它在 Ceres 求出最终外参后运行一次。
+    将优化后的外参保存为 YAML，供后续 fusion 程序读取。
+    yaml_path：输出 YAML 文件路径。
+    csv_path：本次标定使用的 CSV 路径，用于追溯数据来源。
+    observation_count：实际参与标定的观测行数量。
+    rotation_vector：最终旋转向量 phi*，单位为弧度。
+    rotation_map_from_sensor：最终旋转矩阵 R*，负责设备坐标系到地图坐标系的旋转。
+    translation_map_from_sensor：最终平移 t*，单位为米。
+    total_squared_residual：全部观测的最终总平方残差 J。
+    返回 true 表示目录创建和文件写入均成功；false 表示保存失败。
+*/
+bool saveCalibrationResultToYaml(
+    const std::string& yaml_path,
+    const std::string& csv_path,
+    std::size_t observation_count,
+    const Eigen::Vector3d& rotation_vector,
+    const Eigen::Matrix3d& rotation_map_from_sensor,
+    const Eigen::Vector3d& translation_map_from_sensor,
+    double total_squared_residual)
+{
+    const std::filesystem::path output_path(yaml_path);
+    const std::filesystem::path output_directory = output_path.parent_path();
+    std::error_code error_code;
+
+    // 自动创建 calibration/output 等父目录；目录已经存在时也不会报错。
+    if (!output_directory.empty())
+    {
+        std::filesystem::create_directories(output_directory, error_code);
+        if (error_code)
+        {
+            std::printf("无法创建 YAML 输出目录: %s\n", output_directory.string().c_str());
+            return false;
+        }
+    }
+
+    std::ofstream output_file(output_path);
+    if (!output_file.is_open())
+    {
+        std::printf("无法写入 YAML 文件: %s\n", yaml_path.c_str());
+        return false;
+    }
+
+    output_file << std::fixed << std::setprecision(12);
+    output_file << "# 由 methane_calibrate 自动生成。\n";
+    output_file << "source_csv: \"" << csv_path << "\"\n";
+    output_file << "observation_count: " << observation_count << "\n";
+    output_file << "final_total_squared_residual: " << total_squared_residual << "\n";
+    output_file << "\n";
+    output_file << "coordinate_convention:\n";
+    output_file << "  sensor_x: forward\n";
+    output_file << "  sensor_y: left\n";
+    output_file << "  sensor_z: up\n";
+    output_file << "  angle_unit: degree\n";
+    output_file << "  horizontal_positive: counterclockwise\n";
+    output_file << "  vertical_positive: upward\n";
+    output_file << "\n";
+    output_file << "rotation_vector_rad:\n";
+    output_file << "  - " << rotation_vector.x() << "\n";
+    output_file << "  - " << rotation_vector.y() << "\n";
+    output_file << "  - " << rotation_vector.z() << "\n";
+    output_file << "\n";
+    output_file << "rotation_map_from_sensor:\n";
+    output_file << "  rows: 3\n";
+    output_file << "  cols: 3\n";
+    output_file << "  data:\n";
+    for (int row = 0; row < 3; ++row)
+    {
+        for (int column = 0; column < 3; ++column)
+        {
+            output_file << "    - " << rotation_map_from_sensor(row, column) << "\n";
+        }
+    }
+    output_file << "\n";
+    output_file << "translation_map_from_sensor_m:\n";
+    output_file << "  - " << translation_map_from_sensor.x() << "\n";
+    output_file << "  - " << translation_map_from_sensor.y() << "\n";
+    output_file << "  - " << translation_map_from_sensor.z() << "\n";
+
+    if (!output_file)
+    {
+        std::printf("YAML 文件写入不完整: %s\n", yaml_path.c_str());
+        return false;
+    }
+    return true;
+}
+
 int main(int argc, char* argv[])
 {
     // argv[0] 是程序名；另外需要CSV路径和人工测得的tx0、ty0、tz0。
-    if (argc != 5)
+    if (argc != 5 && argc != 6)
     {
-        std::printf("Usage: %s <calibration_csv> <tx0_m> <ty0_m> <tz0_m>\n", argv[0]);
+        std::printf("用法: %s <标定CSV> <tx0_m> <ty0_m> <tz0_m> [输出YAML路径]\n", argv[0]);
         return 1;
     }
 
     // argv[0]：程序名  argv[1]：CSV路径；argv[2..4]：平移初值的三个分量，单位为米。
     const std::string csv_path = argv[1];
+
+    // 默认YAML路径由CSV文件名生成：同一CSV再次运行时覆盖同一个结果文件。
+    const std::filesystem::path csv_file_path(csv_path);
+    const std::filesystem::path default_yaml_path =
+        std::filesystem::path("calibration/output") /
+        (csv_file_path.stem().string() + "_extrinsic.yaml");
+    const std::string yaml_output_path =
+        argc == 6 ? argv[5] : default_yaml_path.string();
     double tx_initial_m = 0.0;
     double ty_initial_m = 0.0;
     double tz_initial_m = 0.0;
@@ -242,8 +391,8 @@ int main(int argc, char* argv[])
 
         CalibrationObservation observation{};
 
-        /*一边执行函数parseObservation判断，一边填充 observation ，填充 地图坐标系xyz 与 设备水平/垂直角度  */
-        if (!parseObservation(line, observation))    //某一行 CSV 解析失败，就打印错误信息并返回错误码 1
+        /* 读取一行原始标定参数，填充地图坐标xyz与设备水平/垂直角度。 */
+        if (!readRawParameters(line, observation))    //某一行 CSV 读取失败，就打印错误信息并返回错误码 1
         {
             std::printf("Invalid CSV row at line %d: %s\n", line_number, line.c_str());
             return 1;
@@ -303,8 +452,10 @@ int main(int argc, char* argv[])
             rotation_initial,
             translation_initial);
 
+    //求旋转向量的模长，得到旋转角度 theta0
     const double rotation_angle_initial_rad = rotation_vector_initial.norm();  //计算旋转角度
 
+    // 求旋转轴 a0 = phi0 / theta0
     // 下面的逻辑 是 如果旋转角度大于一个很小的阈值，就计算旋转轴 a0 = phi0 / theta0，
     // 否则旋转轴为零向量，相当于任意方向旋转了
     Eigen::Vector3d rotation_axis_initial = Eigen::Vector3d::Zero();        
@@ -315,12 +466,12 @@ int main(int argc, char* argv[])
 
     
 
-    std::printf("Calibration observations: %zu\n", observations.size());
-    std::printf("Initial translation t0: [%.6f, %.6f, %.6f] m\n",
+    std::printf("标定观测数量: %zu\n", observations.size());
+    std::printf("初始平移 t0: [%.6f, %.6f, %.6f] m\n",
                 translation_initial.x(),
                 translation_initial.y(),
                 translation_initial.z());
-    std::printf("Initial rotation matrix R0_map_from_sensor:\n");
+    std::printf("初始旋转矩阵 R0（设备坐标系 -> 地图坐标系）:\n");
     std::printf("[%.9f %.9f %.9f]\n",
                 rotation_initial(0, 0),
                 rotation_initial(0, 1),
@@ -333,18 +484,18 @@ int main(int argc, char* argv[])
                 rotation_initial(2, 0),
                 rotation_initial(2, 1),
                 rotation_initial(2, 2));
-    std::printf("Initial rotation vector phi0: [%.9f, %.9f, %.9f] rad\n",
+    std::printf("初始旋转向量 phi0: [%.9f, %.9f, %.9f] rad\n",
                 rotation_vector_initial.x(),
                 rotation_vector_initial.y(),
                 rotation_vector_initial.z());
-    std::printf("Initial rotation angle theta0: %.9f rad (%.6f deg)\n",
+    std::printf("初始总旋转角 theta0: %.9f rad （%.6f 度）\n",
                 rotation_angle_initial_rad,
                 rotation_angle_initial_rad * 180.0 / kPi);
-    std::printf("Initial rotation axis a0: [%.9f, %.9f, %.9f]\n",
+    std::printf("初始单位旋转轴 a0: [%.9f, %.9f, %.9f]\n",
                 rotation_axis_initial.x(),
                 rotation_axis_initial.y(),
                 rotation_axis_initial.z());
-    std::printf("Initial parameters [phi_x, phi_y, phi_z, tx, ty, tz]:\n");
+    std::printf("初始待优化参数 [phi_x, phi_y, phi_z, tx, ty, tz]:\n");
     std::printf("[%.9f, %.9f, %.9f, %.6f, %.6f, %.6f]\n",
                 extrinsic_parameters[0],
                 extrinsic_parameters[1],
@@ -352,13 +503,109 @@ int main(int argc, char* argv[])
                 extrinsic_parameters[3],
                 extrinsic_parameters[4],
                 extrinsic_parameters[5]);
-    std::printf("First initial bearing residual r1: [%.9f, %.9f, %.9f]\n",
+    std::printf("第 1 条观测的初始方向残差 r1: [%.9f, %.9f, %.9f]\n",
                 first_initial_residual.x(),
                 first_initial_residual.y(),
                 first_initial_residual.z());
-    std::printf("Initial total squared residual J: %.12f\n",
+    std::printf("初始总平方残差 J: %.12f\n",
                 initial_total_squared_residual);
+    std::printf("\n");
 
+    // Problem 保存“全部残差块 + 共享的六个待优化参数”的关系。
+    ceres::Problem problem;
+
+    // 一条CSV观测对应一个三维方向残差块。
+    // 每个块共享同一个 extrinsic_parameters 数组，因此优化的是同一组外参。
+    for (const CalibrationObservation& observation : observations)
+    {
+        // CeresBearingResidual 计算残差值；CENTRAL 表示 Ceres 用中心差分计算雅可比。
+        // 3 表示输出残差有3个分量；6 表示输入参数块有6个 double。
+        ceres::CostFunction* cost_function =
+            new ceres::NumericDiffCostFunction<CeresBearingResidual,
+                                                ceres::CENTRAL,
+                                                3,
+                                                6>(
+                new CeresBearingResidual(observation));
+
+        // nullptr 表示暂时不使用鲁棒核；Ceres 默认接管 cost_function 的内存管理。
+        problem.AddResidualBlock(cost_function, nullptr, extrinsic_parameters);
+    }
+
+    std::printf("Ceres 残差块数量: %d\n", problem.NumResidualBlocks());
+
+    // 配置LM求解器。Ceres 在 Solve() 内部反复计算残差、雅可比和六维修正量。
+    ceres::Solver::Options options;
+    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+    options.linear_solver_type = ceres::DENSE_QR;
+    options.max_num_iterations = 50;
+    options.minimizer_progress_to_stdout = true;
+
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+
+    // Solve() 已经直接修改 extrinsic_parameters；现在把最终phi、t取出。
+    const Eigen::Vector3d rotation_vector_final(
+        extrinsic_parameters[0],
+        extrinsic_parameters[1],
+        extrinsic_parameters[2]);
+    const Eigen::Vector3d translation_final(
+        extrinsic_parameters[3],
+        extrinsic_parameters[4],
+        extrinsic_parameters[5]);
+
+    Eigen::Matrix3d rotation_final;
+    ceres::AngleAxisToRotationMatrix(
+        rotation_vector_final.data(),
+        rotation_final.data());
+
+    const Eigen::Vector3d first_final_residual =
+        calculateBearingResidual(
+            observations.front(),
+            rotation_final,
+            translation_final);
+    const double final_total_squared_residual =
+        calculateTotalSquaredResidual(
+            observations,
+            rotation_final,
+            translation_final);
+    const std::string solver_report = summary.BriefReport();
+
+    std::printf("\n%s\n", solver_report.c_str());
+    std::printf("最终旋转向量 phi*: [%.9f, %.9f, %.9f] rad\n",
+                rotation_vector_final.x(),
+                rotation_vector_final.y(),
+                rotation_vector_final.z());
+    std::printf("最终平移 t*: [%.6f, %.6f, %.6f] m\n",
+                translation_final.x(),
+                translation_final.y(),
+                translation_final.z());
+    std::printf("最终旋转矩阵 R*（设备坐标系 -> 地图坐标系）:\n");
+    std::printf("[%.9f %.9f %.9f]\n",
+                rotation_final(0, 0), rotation_final(0, 1), rotation_final(0, 2));
+    std::printf("[%.9f %.9f %.9f]\n",
+                rotation_final(1, 0), rotation_final(1, 1), rotation_final(1, 2));
+    std::printf("[%.9f %.9f %.9f]\n",
+                rotation_final(2, 0), rotation_final(2, 1), rotation_final(2, 2));
+    std::printf("第 1 条观测的最终方向残差 r1: [%.9f, %.9f, %.9f]\n",
+                first_final_residual.x(),
+                first_final_residual.y(),
+                first_final_residual.z());
+    std::printf("最终总平方残差 J: %.12f\n",
+                final_total_squared_residual);
+
+    if (!saveCalibrationResultToYaml(
+            yaml_output_path,
+            csv_path,
+            observations.size(),
+            rotation_vector_final,
+            rotation_final,
+            translation_final,
+            final_total_squared_residual))
+    {
+        return 1;
+    }
+    std::printf("标定结果 YAML 已保存（同名文件会被覆盖）: %s\n",
+                yaml_output_path.c_str());
     return 0;
 }
 

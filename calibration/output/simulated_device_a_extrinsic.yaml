@@ -1,0 +1,36 @@
+# 由 methane_calibrate 自动生成。
+source_csv: "calibration/data/simulated_device_a.csv"
+observation_count: 15
+final_total_squared_residual: 0.000000000000
+
+coordinate_convention:
+  sensor_x: forward
+  sensor_y: left
+  sensor_z: up
+  angle_unit: degree
+  horizontal_positive: counterclockwise
+  vertical_positive: upward
+
+rotation_vector_rad:
+  - 0.110610645234
+  - -0.122932570863
+  - 0.354367348110
+
+rotation_map_from_sensor:
+  rows: 3
+  cols: 3
+  data:
+    - 0.930547566423
+    - -0.352116940214
+    - -0.100473315060
+    - 0.338691691531
+    - 0.931968174545
+    - -0.129318443090
+    - 0.139173146521
+    - 0.086307485479
+    - 0.986499798904
+
+translation_map_from_sensor_m:
+  - 1.200000447608
+  - -0.800000343801
+  - 0.899999842109
