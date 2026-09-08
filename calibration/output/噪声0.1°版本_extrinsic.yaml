@@ -1,0 +1,36 @@
+# 由 methane_calibrate 自动生成。
+source_csv: "calibration/data/噪声0.1°版本.csv"
+observation_count: 15
+final_total_squared_residual: 0.000078270851
+
+coordinate_convention:
+  sensor_x: forward
+  sensor_y: left
+  sensor_z: up
+  angle_unit: degree
+  horizontal_positive: counterclockwise
+  vertical_positive: upward
+
+rotation_vector_rad:
+  - 0.113689532268
+  - -0.115551732148
+  - 0.351599566293
+
+rotation_map_from_sensor:
+  rows: 3
+  cols: 3
+  data:
+    - 0.932364026088
+    - -0.349367921660
+    - -0.092948255343
+    - 0.336394184554
+    - 0.932574819604
+    - -0.130931884729
+    - 0.132424602906
+    - 0.090808926628
+    - 0.987024550551
+
+translation_map_from_sensor_m:
+  - 1.174804028923
+  - -0.795572848029
+  - 0.936020349767
